@@ -8,8 +8,6 @@ int main(void)
     pid_t child;
 
 
-    child = fork();
-
     fd = open("/dev/cdata-misc", O_RDWR);
     write(fd, "h", 1);
     write(fd, "el", 2);

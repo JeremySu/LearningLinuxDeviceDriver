@@ -31,6 +31,11 @@ static int cdata_open(struct inode *inode, struct file *filp)
 
 	printk(KERN_ALERT "cdata in open: filp = %p\n", filp);
 
+	while (1)
+	{
+		schedule();
+	}
+
 	cdata = kmalloc(sizeof(*cdata), GFP_KERNEL);
 	cdata->buf = kmalloc(BUF_SIZE, GFP_KERNEL);
 	cdata->idx = 0;
@@ -65,9 +70,12 @@ static ssize_t cdata_write(struct file *file, const char __user *buf,
 
 	for (i = 0; i < count; i++)
 	{
-		if (cdata->idx >= BUF_SIZE)
-			return -1;
-		cdata->buf[idx] = buf[i];
+		if (idx >= BUF_SIZE - 1)
+		{
+			current->state = TASK_UNINTERRUPTIBLE;
+			schedule();
+		}
+		copy_from_user(&cdata->buf[idx], &buf[i], sizeof(*buf));
 		idx++;
 	}
 	
