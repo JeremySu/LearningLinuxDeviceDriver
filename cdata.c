@@ -11,6 +11,7 @@
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
+#include <linux/ip.h>
 #include <linux/miscdevice.h>
 #include <linux/input.h>
 #include <linux/platform_device.h>
@@ -23,7 +24,20 @@
 struct cdata_t {
 	char *buf;
 	int idx;
+	wait_queue_head_t wait_queue;
+	struct work_struct work_queue;
 };
+
+void flush_buffer(struct work_struct *work)
+{
+	struct cdata_t *cdata = container_of(work, struct cdata_t, work_queue);
+
+	cdata->buf[BUF_SIZE -1] = '\0';
+	printk(KERN_INFO "buf = %s\n", cdata->buf);
+
+	cdata->idx = 0;
+	wake_up(&cdata->wait_queue);
+}
 
 static int cdata_open(struct inode *inode, struct file *filp)
 {
@@ -31,14 +45,12 @@ static int cdata_open(struct inode *inode, struct file *filp)
 
 	printk(KERN_ALERT "cdata in open: filp = %p\n", filp);
 
-	while (1)
-	{
-		schedule();
-	}
-
 	cdata = kmalloc(sizeof(*cdata), GFP_KERNEL);
 	cdata->buf = kmalloc(BUF_SIZE, GFP_KERNEL);
 	cdata->idx = 0;
+
+	init_waitqueue_head(&cdata->wait_queue);
+	INIT_WORK(&cdata->work_queue, flush_buffer);
 
 	filp->private_data = (void*)cdata;
 
@@ -67,13 +79,18 @@ static ssize_t cdata_write(struct file *file, const char __user *buf,
 {
 	struct cdata_t *cdata = (struct cdata_t*)file->private_data;
 	int i = 0, idx = cdata->idx;
+	DECLARE_WAITQUEUE(wait, current);
 
 	for (i = 0; i < count; i++)
 	{
 		if (idx >= BUF_SIZE - 1)
 		{
+			add_wait_queue(&cdata->wait_queue, &wait);
 			current->state = TASK_UNINTERRUPTIBLE;
+			schedule_work(&cdata->work_queue);
 			schedule();
+			remove_wait_queue(&cdata->wait_queue, &wait);
+			idx = cdata->idx;
 		}
 		copy_from_user(&cdata->buf[idx], &buf[i], sizeof(*buf));
 		idx++;
