@@ -1,7 +1,7 @@
 obj-m := cdata.o cdata_plat_dev.o
 util := test
 
-KDIR := /usr/src/linux-headers-4.4.0-75-generic
+KDIR := /usr/src/linux-headers-4.4.0-79-generic
 PWD := $(shell pwd)
 
 default:
