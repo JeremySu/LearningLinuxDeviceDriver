@@ -11,7 +11,6 @@
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
-#include <linux/ip.h>
 #include <linux/miscdevice.h>
 #include <linux/input.h>
 #include <linux/platform_device.h>
@@ -21,13 +20,31 @@
 #define BUF_SIZE 	8
 #define CDATA_MAJOR 121
 
+#define KERNEL_TIMER
+
 struct cdata_t {
 	char *buf;
 	int idx;
 	wait_queue_head_t wait_queue;
+#ifdef KERNEL_TIMER
+	struct timer_list timer;
+#else
 	struct work_struct work_queue;
+#endif
 };
 
+#ifdef KERNEL_TIMER
+void flush_buffer(unsigned long arg)
+{
+	struct cdata_t *cdata = (struct cdata_t*) arg;
+
+	cdata->buf[BUF_SIZE -1] = '\0';
+	printk(KERN_INFO "buf = %s\n", cdata->buf);
+
+	cdata->idx = 0;
+	wake_up(&cdata->wait_queue);
+}
+#else
 void flush_buffer(struct work_struct *work)
 {
 	struct cdata_t *cdata = container_of(work, struct cdata_t, work_queue);
@@ -38,6 +55,7 @@ void flush_buffer(struct work_struct *work)
 	cdata->idx = 0;
 	wake_up(&cdata->wait_queue);
 }
+#endif
 
 static int cdata_open(struct inode *inode, struct file *filp)
 {
@@ -50,7 +68,11 @@ static int cdata_open(struct inode *inode, struct file *filp)
 	cdata->idx = 0;
 
 	init_waitqueue_head(&cdata->wait_queue);
+#ifdef KERNEL_TIMER
+	init_timer(&cdata->timer);
+#else
 	INIT_WORK(&cdata->work_queue, flush_buffer);
+#endif
 
 	filp->private_data = (void*)cdata;
 
@@ -65,6 +87,10 @@ static int cdata_close(struct inode *inode, struct file *filp)
 	cdata->buf[idx] = '\0';
 
 	printk(KERN_ALERT "data buffer %s\n", cdata->buf);
+
+#ifdef KERNEL_TIMER
+	del_timer(&cdata->timer);
+#endif
 
 	kfree(cdata->buf);
 	kfree(cdata);
@@ -85,12 +111,25 @@ static ssize_t cdata_write(struct file *file, const char __user *buf,
 	{
 		if (idx >= BUF_SIZE - 1)
 		{
-			add_wait_queue(&cdata->wait_queue, &wait);
-			current->state = TASK_UNINTERRUPTIBLE;
+			prepare_to_wait(&cdata->wait_queue, &wait, TASK_INTERRUPTIBLE);
+repeat:
+#ifdef KERNEL_TIMER
+			cdata->timer.function = flush_buffer;
+			cdata->timer.data = (unsigned long)cdata;
+			cdata->timer.expires = jiffies + 10 * HZ;
+			add_timer(&cdata->timer);
+#else
 			schedule_work(&cdata->work_queue);
+#endif
 			schedule();
-			remove_wait_queue(&cdata->wait_queue, &wait);
+
+			if (signal_pending(current))
+				return -EINTR;
+
 			idx = cdata->idx;
+			if (idx >= BUF_SIZE - 1) goto repeat;
+
+			remove_wait_queue(&cdata->wait_queue, &wait);
 		}
 		copy_from_user(&cdata->buf[idx], &buf[i], sizeof(*buf));
 		idx++;
