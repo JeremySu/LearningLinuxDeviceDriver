@@ -26,6 +26,7 @@ struct cdata_t {
 	char *buf;
 	int idx;
 	wait_queue_head_t wait_queue;
+	struct mutex write_lock;
 #ifdef KERNEL_TIMER
 	struct timer_list timer;
 #else
@@ -38,7 +39,7 @@ void flush_buffer(unsigned long arg)
 {
 	struct cdata_t *cdata = (struct cdata_t*) arg;
 
-	cdata->buf[BUF_SIZE -1] = '\0';
+	cdata->buf[BUF_SIZE - 1] = '\0';
 	printk(KERN_INFO "buf = %s\n", cdata->buf);
 
 	cdata->idx = 0;
@@ -47,9 +48,10 @@ void flush_buffer(unsigned long arg)
 #else
 void flush_buffer(struct work_struct *work)
 {
-	struct cdata_t *cdata = container_of(work, struct cdata_t, work_queue);
+	struct cdata_t *cdata =
+		container_of(work, struct cdata_t, work_queue);
 
-	cdata->buf[BUF_SIZE -1] = '\0';
+	cdata->buf[BUF_SIZE - 1] = '\0';
 	printk(KERN_INFO "buf = %s\n", cdata->buf);
 
 	cdata->idx = 0;
@@ -73,6 +75,7 @@ static int cdata_open(struct inode *inode, struct file *filp)
 #else
 	INIT_WORK(&cdata->work_queue, flush_buffer);
 #endif
+	mutex_init(&cdata->write_lock);
 
 	filp->private_data = (void*)cdata;
 
@@ -104,14 +107,19 @@ static ssize_t cdata_write(struct file *file, const char __user *buf,
 		size_t count, loff_t *ppos)
 {
 	struct cdata_t *cdata = (struct cdata_t*)file->private_data;
-	int i = 0, idx = cdata->idx;
+	int i = 0, idx = 0;
+
 	DECLARE_WAITQUEUE(wait, current);
+	idx = cdata->idx;
+
+	mutex_lock_interruptible(&cdata->write_lock);
 
 	for (i = 0; i < count; i++)
 	{
 		if (idx >= BUF_SIZE - 1)
 		{
-			prepare_to_wait(&cdata->wait_queue, &wait, TASK_INTERRUPTIBLE);
+			prepare_to_wait(&cdata->wait_queue, &wait,
+				TASK_INTERRUPTIBLE);
 repeat:
 #ifdef KERNEL_TIMER
 			cdata->timer.function = flush_buffer;
@@ -121,12 +129,14 @@ repeat:
 #else
 			schedule_work(&cdata->work_queue);
 #endif
+			mutex_unlock(&cdata->write_lock);
 			schedule();
 
 			if (signal_pending(current))
 				return -EINTR;
 
 			idx = cdata->idx;
+			mutex_lock_interruptible(&cdata->write_lock);
 			if (idx >= BUF_SIZE - 1) goto repeat;
 
 			remove_wait_queue(&cdata->wait_queue, &wait);
@@ -136,6 +146,7 @@ repeat:
 	}
 	
 	cdata->idx = idx;
+	mutex_unlock(&cdata->write_lock);
 
 	return 0;
 }
